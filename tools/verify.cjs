@@ -295,21 +295,41 @@ check("摘要面板渲染出「你问」与「结论」",
   host.some((el) => String(el.props.className || "").includes("zf-sum")),
   "应有 zf-sum 卡片");
 
-/* ---------- 「打开」按钮：反射拿 uiWorkspace.openSession ---------- */
-const openBtn = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("打开"));
-check("摘要卡片提供「打开」", !!openBtn);
+/* ---------- 摘要卡片：主按钮是"就地看汇报"，不再跳页面 ---------- */
+const reportEl = () => host.find((el) => String(el.props.className || "").split(" ").includes("zf-report"));
+const reportBtn = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("看汇报"));
+check("摘要卡片的主按钮是「看汇报」（不跳页面）", !!reportBtn);
+if (reportBtn) reportBtn.props.onClick();
+check("点「看汇报」不会打开原生界面", opened.length === 0, "opened=" + JSON.stringify(opened));
+check("点「看汇报」后就地展开汇报视图", !!reportEl(), "应有 .zf-report");
+check("汇报视图给出该会话的逐轮「你问 / 汇报」",
+  !!reportEl() && JSON.stringify(reportEl().props.children).includes("汇报")
+  && JSON.stringify(reportEl().props.children).includes("你问"));
+
+/* ---------- 「原生界面」入口仍然在，但降级为次要按钮 ---------- */
+const openBtn = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("原生界面"));
+check("原生界面入口仍然保留（不能只有一条路）", !!openBtn);
 if (openBtn) openBtn.props.onClick();
-check("打开走的是反射拿到的 uiWorkspace.openSession",
+check("原生界面入口走的是反射拿到的 uiWorkspace.openSession",
   opened.length === 1, "opened=" + JSON.stringify(opened));
 
 /* 失败必须可见：openSession 抛错时要在日志里说出来，而不是按钮点了没反应 */
 const realOpen = uiWorkspaceStub.openSession;
 uiWorkspaceStub.openSession = () => { throw new Error("模拟：openSession 炸了"); };
-const openBtn2 = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("打开"));
+const openBtn2 = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("原生界面"));
 if (openBtn2) openBtn2.props.onClick();
 check("openSession 抛错时会被如实报出来（不静默）",
   allText().includes("打不开这个会话"), allText().slice(0, 220));
 uiWorkspaceStub.openSession = realOpen;
+
+/* 选中会**钉住发送目标** —— 这是刻意的（"只对上级说话"），但测试之间必须显式清掉，
+   否则后面每条路由用例都会被这个钉子带偏（第一次跑时 7 条用例一起红就是这个原因）。 */
+function clearPin() {
+  const btn = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("改回自动"));
+  if (btn) btn.props.onClick();
+  return !!btn;
+}
+check("汇报视图里有「改回自动」按钮", clearPin());
 
 /* ---------- 输入 → 实时路由预览 ---------- */
 function type(value) {
@@ -327,8 +347,30 @@ type("线上又 502 了");
 check("预览把「502」路由到线上排查会话", previewText().includes("线上 502 排查"), previewText().slice(0, 90));
 check("预览给出了路由层与把握度", /标题匹配|学到的偏好|延续/.test(previewText()) && previewText().includes("%"));
 
+/* ---------- 低把握：**发送之前**就要给警示 + 改投入口 ---------- */
+/* "改版的事情" 只和一个标题共享 2 字片段 → 把握 56%，低于 65% 的线。 */
+type("改版的事情");
+const warnEl = () => host.find((el) => String(el.props.className || "").split(" ").includes("zf-warn"));
+const altBtns = () => host.filter((el) => el.type === "button" && JSON.stringify(el.props.children).includes("改投「"));
+check("把握低于 65% 时，发送前就出现警示", !!warnEl(), previewText().slice(0, 130));
+check("警示里说明了投错的代价", !!warnEl() && JSON.stringify(warnEl().props.children).includes("污染"));
+check("警示里直接列出可以改投的目标", altBtns().length > 0, "按钮 " + altBtns().length);
+check("只是警示，没有替你发出去", sessions.sent.length === 0, "sent=" + sessions.sent.length);
+
+if (altBtns().length) altBtns()[0].props.onClick();
+check("点了改投目标 → 预览变成「你指定的」", previewText().includes("你指定的"), previewText().slice(0, 130));
+check("钉住之后警示消失（不确定性已经没有了）", !warnEl());
+check("钉住仍然不会自动发送（发送永远由你触发）", sessions.sent.length === 0);
+check("选中即就地展开汇报视图（不跳页面）", !!reportEl());
+check("钉住时给得出「改回自动」", clearPin());
+check("改回自动后预览重新由系统判断", previewText().includes("标题匹配") || previewText().includes("延续"), previewText().slice(0, 130));
+
 type("登录页的按钮间距再调一下");
-check("预览把登录页请求路由到登录页会话", previewText().includes("登录页改版"), previewText().slice(0, 90));
+/* 两个会话标题都含「登录页」，分数打平 → 选**最近用过的**那个。
+   这是改成 rankRows 时顺带统一的规则：旧代码在打平时保留数组里靠前的那个，
+   而那个顺序来自主机、语义未知；"最近用过的"更像答案，而且可预测。 */
+check("标题打平时选最近用过的那个（登录页性能优化，5 小时前 vs 2 天前）",
+  previewText().includes("登录页性能优化"), previewText().slice(0, 90));
 
 /* ---------- 回车 → 真实投递 ---------- */
 async function submitDraft() {
@@ -339,7 +381,8 @@ let submitError = null;
 (async () => {
   try { await submitDraft(); } catch (e) { submitError = e; }
   check("投递过程不抛错", !submitError, submitError && submitError.message);
-  check("真的打到了正确的会话", sessions.sent.length === 1 && sessions.sent[0].id === "s-login",
+  check("真的打到了预览里承诺的那个会话（打平局 → 最近用过的）",
+    sessions.sent.length === 1 && sessions.sent[0].id === "s-login2",
     JSON.stringify(sessions.sent));
   check("走的是真实 queue 投递模式", sessions.sent[0] && sessions.sent[0].mode === "queue");
   check("投递来源标记正确", sessions.sent[0] && sessions.sent[0].source === "zeroFriction");
@@ -397,9 +440,9 @@ let submitError = null;
   const btns3 = host.filter((el) => el.type === "button" && JSON.stringify(el.props.children).includes("不是它"));
   if (btns3.length) btns3[btns3.length - 1].props.onClick();
   const pickBtns3 = () => host.filter((el) => el.type === "button"
-    && JSON.stringify(el.props.children).includes("登录页性能优化"));
+    && JSON.stringify(el.props.children).includes("登录页改版"));
   const pick3 = pickBtns3()[pickBtns3().length - 1];
-  check("改投候选里能选到第二个登录页会话", !!pick3);
+  check("改投候选里能选到另一个登录页会话", !!pick3);
   if (pick3) await pick3.props.onClick();
   const stored3 = JSON.parse(storage.getItem("dsh.zeroFriction.v1") || "{}");
   check("特征在别的会话标题里也有时，不写规则",
@@ -517,6 +560,29 @@ let submitError = null;
       allText().slice(0, 200));
   }
 
+  /* ---------- 钉住之后**真的**投给被钉住的会话（不只看预览好看） ----------
+     放在这里：此刻 host 还是主渲染、sessions 还是同一个；再往后规模/空态用例会
+     重渲染别的组件。前面的按条数断言也都已经跑完了。 */
+  (() => {}); // 保持缩进对齐
+  sessions.sent.length = 0;
+  const cardOf2 = (title) => host.find((el) => String(el.props.className || "").split(" ").includes("zf-card")
+    && JSON.stringify(el.props.children).includes(title));
+  const target2 = cardOf2("8 月销量下滑归因");
+  check("能在队列里选中「8 月销量下滑归因」", !!target2);
+  if (target2) target2.props.onClick();
+  check("选中后展开的是这个会话的汇报",
+    !!reportEl() && JSON.stringify(reportEl().props.children).includes("8 月销量下滑归因"));
+  check("汇报视图里点名了它手下的子智能体（层级关系可见）",
+    !!reportEl() && JSON.stringify(reportEl().props.children).includes("子智能体"),
+    "s-sub 的 parentId 是 s-sales");
+  type("这句话只给上级");
+  await cls("zf-send")[0].props.onClick();
+  check("钉住后真的投给被钉住的会话（不是重算路由）",
+    sessions.sent.length === 1 && sessions.sent[0].id === "s-sales" && sessions.sent[0].text === "这句话只给上级",
+    JSON.stringify(sessions.sent));
+  clearPin();
+  check("清掉钉子后预览恢复自动判断", !previewText().includes("你指定的"), previewText().slice(0, 100));
+
   /* ---------- 规模：用满一天之后会有很多会话，每个几十轮 ---------- */
   const BIG = [];
   for (let i = 0; i < 200; i++) {
@@ -615,6 +681,8 @@ let submitError = null;
   mod2.apply(ctx4);
   try { RUNTIME.render(reg3.find((r) => r.opts.name === "main").component, {}); } catch (e) { degradedError = e; }
   check("会话服务缺失时降级渲染不抛错", !degradedError, degradedError && degradedError.message);
+
+
 
   console.log("\n" + (results.every((r) => r.ok) ? "全部通过" : "有失败项") +
     "：" + results.filter((r) => r.ok).length + "/" + results.length);

@@ -46,7 +46,20 @@ $mutations = @(
      to = 'for (let n = 0; n >= 2; n--) {' },
   @{ name = '15 去掉排他性闸门（第15轮加的）'; expect = '特征在别的会话标题里也有时';
      from = 'const keyword = picked && isDiscriminative(picked, rows, row.id) ? picked : null;';
-     to = 'const keyword = picked;' }
+     to = 'const keyword = picked;' },
+  # 第 16-19 个：低把握护栏与层级汇报
+  @{ name = '16 去掉发送前的低把握警示'; expect = '把握低于 65% 时';
+     from = 'const lowConfidence = !!(preview && !preview.pinned && preview.confidence < CONFIDENCE_WARN);';
+     to = 'const lowConfidence = false;' },
+  @{ name = '17 选中不再钉住发送目标'; expect = '钉住后真的投给被钉住的会话';
+     from = 'const decision = pinnedRow'; to = 'const decision = null && pinnedRow' },
+  @{ name = '18 看汇报改回跳页面'; expect = '点「看汇报」不会打开原生界面';
+     from = 'h("button", { className: "zf-tab", onClick: () => setSelected(row.id) }, "看汇报")';
+     to = 'h("button", { className: "zf-tab", onClick: () => openSession(row.id) }, "看汇报")' },
+  @{ name = '19 汇报视图不显示下属'; expect = '汇报视图里点名了它手下的子智能体';
+     from = 'pinnedSubs.length
+					? h("div", { className: "zf-report-subs" },'; to = 'false
+					? h("div", { className: "zf-report-subs" },' }
 )
 
 $rows = @()
