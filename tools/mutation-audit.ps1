@@ -66,7 +66,21 @@ $mutations = @(
   # 现有夹具触发不到它。按纪律，审计里不留不会红的条目。
   @{ name = '22 没证据时退回选上一次用过的'; expect = '没证据时如实标注';
      from = 'row: null, newTopic: true, layer: "没有把握", confidence: 0.2, ask: true,';
-     to = 'row: candidates.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0], layer: "接到最近会话", confidence: 0.3,' }
+     to = 'row: candidates.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0], layer: "接到最近会话", confidence: 0.3,' },
+  # 第 24-27 个：语义路由
+  @{ name = '24 语义路由从不发问'; expect = '没证据时会去问路由助手';
+     from = 'const sessionId = await ensureRouterSession();'; to = 'const sessionId = null;' },
+  @{ name = '25 不复用助手会话（每问一次建一个）'; expect = '第二次问仍然复用同一个助手会话';
+     from = 'const known = routerSessionRef.current || snapshot.prefs.routerSessionId;';
+     to = 'const known = null;' },
+  @{ name = '26 不采纳助手的回答'; expect = '助手答了编号';
+     from = 'if (semantic && semantic.q === text && semantic.status === "done" && semantic.rowId) {';
+     to = 'if (false) {' },
+  # 28 已移除：它守的是「路由助手会话不该成为候选」。夹具里会话多，助手会话排不进前 8，
+  # 所以这个变异在夹具上不会红（试过）。该守卫改在**真机**上验证：会话少时它确实会冒出来
+  # （第一次真机验证就抓到了），加上排除之后不再出现。
+  @{ name = '27 分类请求不再要求只回编号或 NEW'; expect = '并且结尾就是那句指令';
+     from = '只回一个编号或 NEW'; to = '随便回点什么' }
 )
 
 $rows = @()
@@ -89,9 +103,9 @@ try {
     $errLine = (($out -split "`n" | Select-String 'Error' | Select-Object -First 1) -as [string])
     $rows += [pscustomobject]@{
       变异 = $m.name
-      结果 = if ($crashed) { '套件崩了' }
+      结果 = if ($expectedHit) { '红在预期测试上 OK' }
+             elseif ($crashed) { '套件崩了' }
              elseif (-not $isRed) { '仍然全绿（安慰）' }
-             elseif ($expectedHit) { '红在预期测试上 OK' }
              else { '红在别的测试上' }
       红在哪条 = if ($expectedHit) { $m.expect }
                  elseif ($firstFail) { '（首条 FAIL 不是预期的那条）' }

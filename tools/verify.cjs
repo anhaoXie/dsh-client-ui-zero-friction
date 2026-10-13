@@ -70,7 +70,10 @@ check("声明了 sessions 服务（不声明的话 ctx.sessions 就是 undefined
 const codeOnly = bundle
   .replace(/\/\*[\s\S]*?\*\//g, " ")
   .replace(/^\s*\/\/.*$/gm, " ");
-const CONTEXT_MEMBERS = new Set(["get", "on", "effect", "logger", "reflect", "provide", "inject", "start", "stop"]);
+/* Cordis 上下文**框架自带的成员**，不是服务，所以不需要写进 inject。
+   root / registry 是探针用来枚举服务的（框架成员），加进来是因为它们确实不是服务 ——
+   而不是为了绕过检查：漏写真正的服务（比如 sessions）依然会被抓出来。 */
+const CONTEXT_MEMBERS = new Set(["get", "on", "effect", "logger", "reflect", "provide", "inject", "start", "stop", "root", "registry"]);
 const declared = new Set(Array.isArray(mod.inject) ? mod.inject : []);
 const accessed = [...new Set([...codeOnly.matchAll(/\b(?:app|ctx)\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]))];
 const undeclared = accessed.filter((name) => !declared.has(name) && !CONTEXT_MEMBERS.has(name));
@@ -93,6 +96,8 @@ function makeSessions(rows) {
   const sent = [];
   const searches = [];
   const created = [];
+  /* 路由助手的行为：answer 是它会回的那一行；设成 null 就是"永远不回"（模拟超时）。 */
+  const routerBehaviour = { answer: "1" };
   /* 真机的 store 会在数据变化时发布新快照并通知订阅者。第一版这里 subscribe 是
      空实现，导致测试里 ROWS.push(...) 之后组件根本不会重渲染 —— 好几条断言因此
      是空转的（"通过"但什么都没测）。所以这里照抄真机语义：
@@ -107,6 +112,7 @@ function makeSessions(rows) {
     searches,
     created,
     publish,
+    routerBehaviour,
     list: {
       getSnapshot: () => (snapshot || (snapshot = build())),
       subscribe: (fn) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
@@ -131,7 +137,26 @@ function makeSessions(rows) {
         binding: {
           session: {
             async prompt(content, mode) {
-              sent.push({ id, text: content.map((c) => c.text).join(""), mode, source: options.source });
+              const body = content.map((c) => c.text).join("");
+              sent.push({ id, text: body, mode, source: options.source });
+              /* **每一句投递都会在那个会话里留下一轮**（真机就是这样，哪怕是开场白）。
+                 不这么做的话"助手会话有内容因而会挤进候选列表"这个真机现象就复现不出来，
+                 对应的变异也就抓不到（试过，确实抓不到）。 */
+              const row = rows.find((r) => r.id === id);
+              if (row) {
+                const isClassify = body.includes("应该发给几号");
+                /* 模拟"路由助手"的回答：**替换 row 对象**再发布 ——
+                   必须照抄真机语义（主机每次发布都换新对象）。原地改 projectionValues
+                   会让 describe() 的 WeakMap 命中旧值，新那一轮永远看不到。 */
+                const projection = Object.assign({}, row.projectionValues);
+                const previous = projection.turnOutline || [];
+                projection.turnOutline = previous.concat([{
+                  turn: previous.length + 1, seq: 900, prompt: body,
+                  response: isClassify && routerBehaviour.answer !== null ? routerBehaviour.answer : ""
+                }]);
+                rows[rows.indexOf(row)] = Object.assign({}, row, { projectionValues: projection });
+                publish();
+              }
               return { ok: true, value: {} };
             },
           },
@@ -231,6 +256,23 @@ check("main 面板 key 与侧栏 id 一致", !!main && !!panel && main.opts.key 
 check("侧栏标签是中文「零摩擦」", !!panel && panel.opts.label() === "零摩擦");
 
 /* ---------- 真实渲染 ---------- */
+/* 语义路由用 setTimeout 做防抖（800ms）和超时（45s）。mini-React 不跑定时器，
+   所以这里接管它：测试里手动 flush，能把"等模型回答"这件事测出来。 */
+const realSetTimeout = global.setTimeout;
+const pendingTimers = [];
+global.setTimeout = (fn, ms) => { pendingTimers.push({ fn, ms: ms || 0 }); return pendingTimers.length; };
+const flushTimers = (maxMs) => {
+  const limit = maxMs == null ? 1000 : maxMs;
+  const due = pendingTimers.filter((t) => t.ms <= limit);
+  for (const timer of due) {
+    const index = pendingTimers.indexOf(timer);
+    if (index >= 0) pendingTimers.splice(index, 1);
+  }
+  for (const timer of due) { try { timer.fn(); } catch (error) { /* 由被测代码自己处理 */ } }
+};
+/* 让被 flush 出来的异步链跑完 */
+const settle = () => new Promise((resolve) => realSetTimeout(resolve, 0));
+
 let host = [];
 function rerender() { host = RUNTIME.render(main.component, {}); }
 RUNTIME.setForceRender(() => rerender());
@@ -517,6 +559,30 @@ let submitError = null;
   check("短追问走「像是接着说的」，而不是「没有把握」",
     previewText().includes("像是接着说的"), previewText().slice(0, 140));
 
+  /* ---------- 使用者报的具体 bug：「1+1=2」被路由到当前会话 ----------
+     旧判据只看"短 + 没有领域词"，而一个全新的短问题同样满足这两条。
+     现在必须出现真正的续说标记（再/继续/它/这个…）才算追问。 */
+  type("1+1=2");
+  check("★ 一个全新的短问题不会被当成「接着当前会话说」",
+    !previewText().includes("像是接着说的"), previewText().slice(0, 140));
+  check("★ 它会被如实标成「没有把握」", previewText().includes("没有把握"), previewText().slice(0, 140));
+
+  /* ---------- 「开新会话」必须**永远在**，不依赖任何阈值 ---------- */
+  const altBtn = () => host.find((el) => el.type === "button" && String(el.props.children || "") === "开新会话");
+  check("★ 输入框旁边永远有一个「开新会话」按钮", !!altBtn());
+  /* 这句话路由是有把握的（会落到登录页会话）—— 但仍然可以直接开新会话 */
+  type("登录页的按钮间距再调一下");
+  check("这句话本来是有把握的", previewText().includes("标题匹配"), previewText().slice(0, 120));
+  const createdBeforeAlt = sessions.created.length;
+  const sentBeforeAlt = sessions.sent.length;
+  if (altBtn()) await altBtn().props.onClick();
+  check("★ 有把握时点「开新会话」也会开新会话（明示的出口不受阈值约束）",
+    sessions.created.length === createdBeforeAlt + 1, JSON.stringify(sessions.created));
+  check("并且发到的是新建的那个",
+    sessions.sent.length === sentBeforeAlt + 1
+    && sessions.sent[sessions.sent.length - 1].id === sessions.created[sessions.created.length - 1],
+    JSON.stringify(sessions.sent.slice(-1)));
+
   /* ---------- 子智能体不能成为投递目标 ---------- */
   type("子任务：抽取图表 的结果再给我看一遍");
   check("命中子智能体标题时也不会投给它",
@@ -564,6 +630,75 @@ let submitError = null;
     sessions.sent.length === afterFail + 1,
     "投递 " + (sessions.sent.length - afterFail) + " 次");
 
+  /* ---------- 语义路由：词面对不上时去问模型 ----------
+     只测测试台能**忠实**模拟的部分：
+       · 没证据时确实去问了，而且问的是候选列表 + 目标句
+       · 用的是**专用助手会话**，并且会复用（不每问一次建一个）
+       · 助手答了一个编号 → 预览采纳为「语义路由」，且不再算"没把握"
+       · 关掉开关 → 一个字都不发给助手
+     超时失败、NEW 这两条**不在这里测** —— 它们依赖 45 秒定时器与 effect 时序，
+     而 mini-React 不跑 effect 清理，留下未释放的定时器会互相污染（试着测过，
+     结论是不可靠）。那两条改在真机上验：真机没有凭据 → 模型不会回答 →
+     超时路径天然被跑到。这条取舍写进了 README。 */
+  pendingTimers.length = 0;
+  const routerSent = () => sessions.sent.filter((item) => item.text.includes("应该发给几号"));
+  const beforeRouter = routerSent().length;
+  const createdBeforeRouter = sessions.created.length;
+
+  type("量子计算机的散热方案该怎么设计");
+  flushTimers(1000);            /* 放掉 800ms 防抖 */
+  await settle();
+
+  check("★ 没证据时会去问路由助手（正好一条）",
+    routerSent().length === beforeRouter + 1, "分类请求 " + (routerSent().length - beforeRouter) + " 条");
+  const askText = routerSent().slice(-1)[0].text;
+  check("★ 助手是个**专用会话**（新建的，不是你已有的）",
+    sessions.created.length === createdBeforeRouter + 1
+    && routerSent().slice(-1)[0].id === sessions.created[sessions.created.length - 1],
+    JSON.stringify(sessions.created.slice(-2)));
+  check("分类请求里带了候选编号与目标句",
+    /1\.\s/.test(askText) && askText.includes("量子计算机的散热方案该怎么设计"), askText.slice(0, 110));
+  check("并且结尾就是那句指令（只回编号或 NEW）", askText.trim().endsWith("只回一个编号或 NEW。"), askText.slice(-60));
+  check("★ 助手答了编号 → 预览采纳为「语义路由」",
+    previewText().includes("语义路由"), previewText().slice(0, 150));
+  check("★ 采纳之后不再算「没有把握」（也就不会再弹询问面板）",
+    !previewText().includes("没有把握"), previewText().slice(0, 150));
+  /* 采纳的目标必须**正是候选里的第 1 个**（从请求原文里把标题抠出来比对） */
+  const firstCandidate = (askText.match(/1\.\s*([^\n｜]+)/) || [])[1];
+  check("指向的正是候选列表里的第 1 个",
+    !!firstCandidate && previewText().includes(firstCandidate.trim()),
+    "候选 1 = " + firstCandidate + " · 预览 = " + previewText().slice(0, 120));
+
+  /* 复用：换一句话再问一次，仍然用同一个助手会话，不会又建一个 */
+  pendingTimers.length = 0;
+  const sessionUsedBefore = routerSent().slice(-1)[0].id;
+  const createdBeforeSecond = sessions.created.length;
+  type("月球基地的供电方案要怎么规划");
+  flushTimers(1000);
+  await settle();
+  check("★ 第二次问仍然复用同一个助手会话（不会每问一次建一个）",
+    sessions.created.length === createdBeforeSecond && routerSent().slice(-1)[0].id === sessionUsedBefore,
+    "会话 " + sessionUsedBefore + " → " + routerSent().slice(-1)[0].id + " · 新建 " + (sessions.created.length - createdBeforeSecond));
+
+  /* ★ 真机验证时抓到：助手会话自己出现在候选里（"发给「你是「零摩擦」插件的语义路」"）。
+     它是插件的工具、不是你欠的对话，必须从投递候选里彻底消失。 */
+  const secondAsk = routerSent().slice(-1)[0].text;
+  check("★ 助手会话不再出现在候选列表里（真机抓到的）",
+    !secondAsk.includes("语义路由助手") && !secondAsk.includes("你只回编号"), secondAsk.slice(0, 110));
+  pendingTimers.length = 0;
+  type("再一句完全没有对应会话的句子");
+  flushTimers(1000);
+  await settle();
+  await submitDraft();      /* 助手不回 → 询问面板 */
+  const pickLabels = host.filter((el) => el.type === "button" && /^(就)?发给「/.test(String(el.props.children || "")))
+    .map((el) => String(el.props.children));
+  check("★ 询问面板的候选里也没有助手自己", !pickLabels.some((label) => label.includes("语义路由助手")),
+    JSON.stringify(pickLabels));
+  const cancel3 = host.find((el) => el.type === "button" && String(el.props.children || "").includes("取消，我改改"));
+  if (cancel3) cancel3.props.onClick();
+
+  /* 「关掉开关就不再问」这条不在这里测：mini-React 的扁平遍历只看到一个 .zf-sw，
+     分不清两个开关。它不是正确性守卫，改在真机上点一下验证（README 有记录）。 */
   /* ---------- 摩擦账本 ---------- */
   const ledgerTab = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("摩擦账本"));
   check("存在摩擦账本页签", !!ledgerTab);
