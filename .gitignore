@@ -1,0 +1,26 @@
+# 依赖与构建产物
+node_modules/
+pnpm-lock.yaml
+
+# 安装/卸载脚本在 profile 里留下的备份（属于别人的机器，不该进仓库）
+.install-backup/
+.uninstall-backup/
+.profile-backup-*/
+
+# 开发时的真机验证截图。
+# 它们拍到了真实会话的标题与结论，属于私有数据 —— 不要提交。
+# 如果你要用自己的截图，删掉这一行并自行确认里面没有不想公开的内容。
+verified/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 日志与临时文件
+*.log
+*.tmp
+~$*

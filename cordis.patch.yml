@@ -1,0 +1,10 @@
+# Zero-friction workspace bundle patch.
+#
+# A self-naming row. The row id, the package name, and the browser module id
+# are deliberately identical: the modules node half mounts a package's browser
+# half on the row whose specifier equals the package name, and serves that
+# module under its id. Making all three coincide removes any chance of the
+# panel registering under an id the shell is not looking for.
+- insert:
+    - id: dsh-client-ui-zero-friction
+      name: dsh-client-ui-zero-friction
