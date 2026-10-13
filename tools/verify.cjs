@@ -190,7 +190,7 @@ const ROWS = [
   { id: "s-login2", displayTitle: "登录页性能优化", running: false, blank: false, updatedAt: now - 5 * 3600e3, cwd: "C:\\work\\web", retainedBy: { mainView: 0 },
     projectionValues: {
       title: "登录页性能优化",
-      turnOutline: [{ turn: 1, seq: 4, prompt: "登录页首屏太慢", response: "把首屏依赖砍到 3 个。" }],
+      turnOutline: [{ turn: 1, seq: 4, prompt: "登录页首屏太慢", response: "这个方案怎么落地？设计上先把首屏依赖砍到 3 个。" }],
       sessionStats: { turns: 1 }, contextPressure: { pressureTokens: 8000, contextWindow: 1000000 },
       inbox: { "next-turn": [], "next-step": [] }, userQuestions: { active: [], settled: [] },
       plan: { active: false, pending: false }, sessionListMetadata: { blank: false, lastPromptAt: now - 5 * 3600e3 }
@@ -372,6 +372,24 @@ type("登录页的按钮间距再调一下");
 check("标题打平时选最近用过的那个（登录页性能优化，5 小时前 vs 2 天前）",
   previewText().includes("登录页性能优化"), previewText().slice(0, 90));
 
+/* ---------- 内容相似度**不做决定**，只给询问面板排序 ----------
+   真机实测两轮的结论：字面匹配在长中文文本上不可靠 ——
+   最小片段设 2 会把无关的话吸走，设 3 又匹配不上"归档"这种 2 字关键词。
+   而一个假阳性比"没把握"更糟，因为它会跳过询问。
+   所以内容相似度只用来回答"如果是这几个，哪个最像"，由人来拍板。 */
+type("keepalive 要怎么调");
+check("★ 内容像也不自动发：收敛到「没有把握」并准备问你",
+  previewText().includes("没有把握"), previewText().slice(0, 150));
+
+type("量子计算机的散热方案该怎么设计");
+check("★ 泛泛的话同样是「没有把握」",
+  previewText().includes("没有把握"), previewText().slice(0, 150));
+
+/* 上面这句改了草稿 —— 后面按条数断言的回执用例必须先恢复成它们要的那句 */
+
+/* 上面这句测试改了草稿 —— 后面按条数断言的回执用例必须先恢复成它们要的那句 */
+type("登录页的按钮间距再调一下");
+
 /* ---------- 回车 → 真实投递 ---------- */
 async function submitDraft() {
   const send = cls("zf-send")[0];
@@ -455,21 +473,49 @@ let submitError = null;
     previewText().includes("学到的偏好") && previewText().includes("线上 502 排查"),
     previewText().slice(0, 130));
 
-  /* ---------- 新话题：接不住就开新会话，而不是硬塞 ---------- */
+  /* ---------- 没证据时：问你，而不是替你挑"上一次用过的" ---------- */
+  const choicePanel = () => host.find((el) => String(el.props.className || "").split(" ").includes("zf-choice"));
+
+  /* 先验"面板把内容最接近的排在第一位" —— 内容相似度只用在这里，不用来做决定 */
+  const sentBeforeCancel = sessions.sent.length;
+  type("keepalive 要怎么调");
+  await submitDraft();
+  const askBtns = () => host.filter((el) => el.type === "button" && /^(就)?发给「/.test(String(el.props.children || "")));
+  check("没证据时按回车会打开询问面板", askBtns().length > 0, "候选按钮 " + askBtns().length);
+  check("★ 面板把**内容最接近**的排在第一位（s-502 聊过 keepalive）",
+    askBtns().length > 0 && JSON.stringify(askBtns()[0].props.children).includes("线上 502 排查"),
+    JSON.stringify(askBtns().map((b) => b.props.children)));
+  const cancelBtn = host.find((el) => el.type === "button" && String(el.props.children || "").includes("取消，我改改"));
+  if (cancelBtn) cancelBtn.props.onClick();
+  check("点「取消」后回到普通输入状态", !choicePanel(), "面板应收起");
+  check("取消不会发送任何东西", sessions.sent.length === sentBeforeCancel, "sent=" + sessions.sent.length);
+
   type("帮我做一个权限审批系统，要能配置角色和审批流");
   const previewNew = previewText();
-  check("新话题在预览里如实标注", previewNew.includes("新话题") || previewNew.includes("新会话"), previewNew.slice(0, 120));
+  check("没证据时如实标注「没有把握」", previewNew.includes("没有把握"), previewNew.slice(0, 140));
+
   const createdBefore = sessions.created.length;
+  const sentBeforeAsk = sessions.sent.length;
   await submitDraft();
-  check("新话题真的开了一个新会话", sessions.created.length === createdBefore + 1, JSON.stringify(sessions.created));
+  check("★ 没证据时按回车**不发送**，而是把选择面板摆出来", !!choicePanel(),
+    "应有 .zf-choice；实际投递 " + (sessions.sent.length - sentBeforeAsk) + " 次");
+  check("★ 也确实没有替你开新会话（要等你选）", sessions.created.length === createdBefore);
+  check("面板里明确问是否开新会话",
+    !!choicePanel() && JSON.stringify(choicePanel().props.children).includes("开个新会话"));
+
+  const newBtn = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("开个新会话发出去"));
+  check("面板里能选「开个新会话发出去」", !!newBtn);
+  if (newBtn) await newBtn.props.onClick();
+  check("选了之后真的开了一个新会话", sessions.created.length === createdBefore + 1, JSON.stringify(sessions.created));
   check("消息投进了新建的那个会话",
     sessions.sent[sessions.sent.length - 1].id === sessions.created[sessions.created.length - 1],
     JSON.stringify(sessions.sent.slice(-1)));
-  check("回执写明是新建的", allText().includes("自动开了新会话"));
+  check("回执写明是新建的", allText().includes("开了新会话"));
 
-  /* 短追问不该被当成新话题 */
+  /* 短追问不该被当成"没把握" —— 它接着当前会话说是合理的（但仍然标成 ask） */
   type("再改一下");
-  check("短追问不会被当成新话题", !previewText().includes("新会话"), previewText().slice(0, 120));
+  check("短追问走「像是接着说的」，而不是「没有把握」",
+    previewText().includes("像是接着说的"), previewText().slice(0, 140));
 
   /* ---------- 子智能体不能成为投递目标 ---------- */
   type("子任务：抽取图表 的结果再给我看一遍");
@@ -500,6 +546,10 @@ let submitError = null;
   type("帮我做一个全新的权限审批系统，需要角色和审批流");
   const beforeFail = sessions.sent.length;
   await sendButton().props.onClick();
+  /* 没证据 → 现在先经选择面板（这本身就是新行为），再选"开新会话"走到 create 那条失败路径 */
+  const failNewBtn = host.find((el) => el.type === "button" && JSON.stringify(el.props.children).includes("开个新会话发出去"));
+  check("失败路径也要先经过选择面板", !!failNewBtn);
+  if (failNewBtn) await failNewBtn.props.onClick();
   check("新建会话失败时如实报错", allText().includes("投递失败"),
     "最近投递: " + JSON.stringify(sessions.sent.slice(-2)) + " · 预览: " + previewText().slice(0, 120));
   check("失败时没有误投到别的会话", sessions.sent.length === beforeFail, "投递 " + (sessions.sent.length - beforeFail) + " 次");
